@@ -160,15 +160,77 @@ def enrich_formula(formula):
         return formula
 
 
-def formula_to_asp_facts(formula):
+# def formula_to_asp_facts(formula):
+#
+#     def fact_constructor(index, formula):
+#         if isinstance(formula, Var):
+#             return index+1, f"subformula({index},var({formula.name})).\n"
+#         if isinstance(formula, NE):
+#             return index+1, f"subformula({index},ne).\n"
+#         if isinstance(formula, Bottom):
+#             return index+1, f"subformula({index},bottom).\n"
+#         if isinstance(formula, (And, Or)):
+#             orig_index = index
+#             index += 1
+#             program = ""
+#             child_indices = []
+#             for child in formula.children:
+#                 child_indices.append(index)
+#                 index, add_program = fact_constructor(index, child)
+#                 program += add_program
+#             if isinstance(formula, Or):
+#                 program += f"subformula({orig_index},or).\n"
+#             if isinstance(formula, And):
+#                 program += f"subformula({orig_index},and).\n"
+#             for child_index in child_indices:
+#                 program += f"child({orig_index},{child_index}).\n"
+#             return index, program
+#         if isinstance(formula, (Diamond, Box, Neg)):
+#             if isinstance(formula, Diamond):
+#                 program = f"subformula({index},diamond).\n"
+#             elif isinstance(formula, Box):
+#                 program = f"subformula({index},box).\n"
+#             elif isinstance(formula, Neg):
+#                 program = f"subformula({index},neg).\n"
+#             program += f"child({index},{index+1}).\n"
+#             index, add_program = fact_constructor(index+1, formula.child)
+#             program += add_program
+#             return index, program
+#
+#     _, program = fact_constructor(1, formula)
+#     return program + "formula_root(1).\n"
 
-    def fact_constructor(index, formula):
+
+def encode_formula_tree(formula, num_vars, polarity):
+
+    def encode_formula_tree(index, formula, num_vars, polarity):
+
+        posneg = "neg"
+        if polarity:
+            posneg = "pos"
+
+        # Case: variable
         if isinstance(formula, Var):
-            return index+1, f"subformula({index},var({formula.name})).\n"
+            return index+1, f"ft_node({index},var({formula.name}),{posneg}).\n"
+        # Case: NE
         if isinstance(formula, NE):
-            return index+1, f"subformula({index},ne).\n"
+            return index+1, f"ft_node({index},ne,{posneg}).\n"
+        # Case: bottom
         if isinstance(formula, Bottom):
-            return index+1, f"subformula({index},bottom).\n"
+            return index+1, f"ft_node({index},bottom,{posneg}).\n"
+        # Case: negation
+        if isinstance(formula, Neg):
+            program = f"ft_node({index},neg,{posneg}).\n"
+            program += f"ft_edge({index},{index+1},equal).\n"
+            index, add_program = encode_formula_tree(
+                index+1,
+                formula.child,
+                num_vars,
+                not polarity,
+            )
+            program = add_program + program
+            return index, program
+        # Case: conjunction/disjunction
         if isinstance(formula, (And, Or)):
             orig_index = index
             index += 1
@@ -176,229 +238,217 @@ def formula_to_asp_facts(formula):
             child_indices = []
             for child in formula.children:
                 child_indices.append(index)
-                index, add_program = fact_constructor(index, child)
-                program += add_program
+                index, add_program = encode_formula_tree(
+                    index,
+                    child,
+                    num_vars,
+                    polarity,
+                )
+                program = add_program + program
             if isinstance(formula, Or):
-                program += f"subformula({orig_index},or).\n"
+                program += f"ft_node({orig_index},or,{posneg}).\n"
             if isinstance(formula, And):
-                program += f"subformula({orig_index},and).\n"
+                program += f"ft_node({orig_index},and,{posneg}).\n"
+            edge_type = "equal"
+            if ((isinstance(formula, And) and not polarity) or \
+                (isinstance(formula, Or) and polarity)):
+                edge_type = "join"
             for child_index in child_indices:
-                program += f"child({orig_index},{child_index}).\n"
+                program += f"ft_edge({orig_index},{child_index},{edge_type}).\n"
             return index, program
-        if isinstance(formula, (Diamond, Box, Neg)):
+        # Case: diamond/box
+        if isinstance(formula, (Diamond, Box)):
+            orig_index = index
+            index += 1
+            program = ""
+            child_indices = []
+            for _ in range(num_vars):
+                child_indices.append(index)
+                index, add_program = encode_formula_tree(
+                    index,
+                    formula.child,
+                    num_vars,
+                    polarity,
+                )
+                program = add_program + program
             if isinstance(formula, Diamond):
-                program = f"subformula({index},diamond).\n"
+                program += f"ft_node({orig_index},diamond,{posneg}).\n"
             elif isinstance(formula, Box):
-                program = f"subformula({index},box).\n"
-            elif isinstance(formula, Neg):
-                program = f"subformula({index},neg).\n"
-            program += f"child({index},{index+1}).\n"
-            index, add_program = fact_constructor(index+1, formula.child)
-            program += add_program
+                program += f"ft_node({orig_index},box,{posneg}).\n"
+            edge_type = "choice_rel"
+            if ((isinstance(formula, Diamond) and not polarity) or \
+                (isinstance(formula, Box) and polarity)):
+                edge_type = "full_rel"
+            for child_index in child_indices:
+                program += f"ft_edge({orig_index},{child_index},{edge_type}).\n"
             return index, program
 
-    _, program = fact_constructor(1, formula)
-    return program + "formula_root(1).\n"
+    _, program = encode_formula_tree(
+        1,
+        formula,
+        num_vars,
+        polarity,
+    )
+    return program + "ft_root(1).\n"
 
 
 def solve_bsml_sat(
     formula,
     max_num_worlds=4,
     num_vars=3,
-    max_size_state_tree=8,
     verbose=True,
     use_minimization_heuristics=False,
 ):
 
-    formula_program = formula_to_asp_facts(formula_to_nf(formula))
+    formula_program = encode_formula_tree(
+        formula_to_nf(formula),
+        num_vars,
+        True,
+    )
 
+    # Guess a Kripke model
     model_program = f"""
         possible_world(1..{max_num_worlds}).
         var(1..{num_vars}).
-        state_node(1..{max_size_state_tree}).
     """
     model_program += """
+        % Only use a (sequential non-empty) subset of the possible worlds
         { world(W) : possible_world(W) }.
         world(W-1) :- world(W), possible_world(W-1).
         :- not world(1).
 
+        % Guess a valuation
         { valuation(W,V) : world(W), var(V) }.
 
+        % Guess a relation
         { relation(W1,W2) : world(W1), world(W2) }.
 
-        state_root(1).
-
-        { state(N,W) : world(W) } :- state_node(N).
-
-        state_nonempty(N) :- state_node(N), state(N,W).
-        state_empty(N) :- state_node(N), not state(N,W) : world(W).
-
-        state_type(join;relation;full_relation;leaf;inactive).
-        1 { state_type(N,T) : state_type(T) } 1 :- state_node(N).
-
-        :- state_type(R,inactive), state_root(R).
-        :- state_type(N,inactive), state_nonempty(N).
-
-        1 { state_edge(N,M) : state_node(M), N != M } :-
-            state_type(N,join), state_nonempty(N).
-        :- state_type(N,join),
-            state(N,W), not state(M,W) : state_edge(N,M).
-        :- state_type(N,join),
-            state_edge(N,M), state(M,W), not state(N,W).
-
-        1 { state_edge(N,M) : state_node(M), N != M } :-
-            state_type(N,relation), state_nonempty(N).
-        :- state_type(N,relation), state_edge(N,M), state_empty(M).
-        1 { state_successor(M,W) : state_edge(N,M) } 1 :-
-            state_type(N,relation), state(N,W).
-        :- state_successor(M,W1), state(M,W2), not relation(W1,W2).
-
-        1 { state_edge(N,M) : state_node(M), N != M } :-
-            state_type(N,full_relation), state_nonempty(N).
-        1 { state_full_successor(M,W) : state_edge(N,M) } 1 :-
-            state_type(N,full_relation), state(N,W).
-        :- state_full_successor(M,W1), state(M,W2), not relation(W1,W2).
-        :- state_full_successor(M,W1), relation(W1,W2), not state(M,W2).
-
-        :- state_node(N),
-            not state_root(N),
-            not state_edge(M,N) : state_node(M);
-            not state_type(N,inactive).
-
-        state_edge_trans(N1,N2) :- state_edge(N1,N2).
-        state_edge_trans(N1,N3) :- state_edge_trans(N1,N2), state_edge(N2,N3).
-        :- state_edge_trans(N,N).
-        :- state_edge(N1,N3), state_edge(N2,N3), N1 != N2.
-        :- state_edge(N,M), M <= N.
-
-        states_identical(N1,N2) :- state_node(N1), state_node(N2), N1 != N2,
-            state(N1,W) : state(N2,W);
-            state(N2,W) : state(N1,W).
-
-        :- state_edge(N1,N2), state_edge(N1,N3),
-            states_identical(N2,N3),
-            state_type(N2,T), state_type(N3,T).
-
-        %%% SYMMETRY BREAKING:
-
-        :- state_edge(N1,N2), state_type(N1,inactive).
-        :- state_edge(N1,N2), state_type(N2,inactive).
-        :- state_node(N1), state_node(N2), N2 > N1,
-            state_type(N1,inactive), not state_type(N2,inactive).
-
+        % Symmetry breaking: order worlds by their out-degree
         out_degree(W1,D) :- world(W1), D = #count { W2 : relation(W1,W2) }.
         :- out_degree(W1,D1), out_degree(W2,D2), W2 > W1, D2 < D1.
         %in_degree(W1,D) :- world(W1), D = #count { W2 : relation(W2,W1) }.
         %:- out_degree(W1,D), out_degree(W2,D), W2 > W1,
         %    in_degree(W1,D1), in_degree(W2,D2), D2 < D1.
 
-        siblings(N1,N2) :- state_node(N1), state_node(N2), N1 != N2,
-            state_edge(N,N1), state_edge(N,N2).
-        has_sibling(N1) :- siblings(N1,N2).
-        direct_family(N1,N2) :- siblings(N1,N2).
-        direct_family(N1,N2) :- state_edge(N1,N2).
-        direct_family(N1,N2) :- state_edge(N2,N1).
-        :- state_node(N), state_node(N+1), state_node(N+2),
-            not state_type(N,inactive),
-            not state_type(N+1,inactive),
-            not state_type(N+2,inactive),
-            has_sibling(N+1),
-            not direct_family(N,N+1),
-            not direct_family(N+1,N+2).
-
         #show world/1.
         #show valuation/2.
         #show relation/2.
-        #show state(W) : state(R,W), state_root(R).
     """
 
+    # Express the semantics
     semantics_program = """
-        %%% AUXILIARY
-        support(F,N1) :- state_edge(N1,N2), states_identical(N1,N2), support(F,N2).
-        antisupport(F,N1) :- state_edge(N1,N2), states_identical(N1,N2), antisupport(F,N2).
+        % Guess states for each (active) node
+        { state(N,W) : world(W) } :- ft_node(N,_,_), ft_active(N).
+        #show state(W) : state(R,W), ft_root(R).
 
-        %%% VAR
-        support(F,N) :- subformula(F,var(V)), state_node(N),
-            valuation(W,V) : state(N,W).
-        antisupport(F,N) :- subformula(F,var(V)), state_node(N),
-            not valuation(W,V) : state(N,W).
+        % Auxiliary predicates
+        state_nonempty(N) :- ft_node(N,_,_), state(N,W).
+        state_empty(N) :- ft_node(N,_,_), not state(N,W) : world(W).
 
-        %%% NEG
-        support(F1,N) :- subformula(F1,neg), state_node(N),
-            child(F1,F2), antisupport(F2,N).
-        antisupport(F1,N) :- subformula(F1,neg), state_node(N),
-            child(F1,F2), support(F2,N).
+        % Redundant: inactive nodes have empty states
+        :- ft_node(N,_,_), not ft_active(N),
+            state(N,W), world(W).
 
-        %%% OR
-        child_supported(F1,F2,N1) :- subformula(F1,or), state_node(N1),
-            state_type(N1,join), child(F1,F2), state_edge(N1,N2),
-            support(F2,N2).
-        state_child_supported(F1,N1,N2) :- subformula(F1,or), state_node(N1),
-            state_type(N1,join), child(F1,F2), state_edge(N1,N2),
-            support(F2,N2).
-        support(F1,N1) :- subformula(F1,or), state_node(N1),
-            state_type(N1,join),
-            child_supported(F1,F2,N1) : child(F1,F2);
-            state_child_supported(F1,N1,N2) : state_edge(N1,N2).
-        antisupport(F1,N) :- subformula(F1,or), state_node(N),
-            antisupport(F2,N) : child(F1,F2).
+        % Guess which nodes are active
+        { ft_active(N) : ft_node(N,_,_) }.
+        % Root must be active
+        :- not ft_active(R), ft_root(R).
+        % Inactivity propagates down in the tree
+        :- ft_node(N1,_,_), ft_edge(N1,N2,_),
+            not ft_active(N1), ft_active(N2).
+        % Inactivity propagates to the right for siblings in the tree
+        % (or equally: activity propagates to the left for siblings)
+        ft_right_sibling(N1,N2) :- ft_edge(N,N1,_), ft_edge(N,N2,_),
+            N1 < N2.
+        :- ft_right_sibling(N1,N2), not ft_active(N1), ft_active(N2).
+        % Activity propagates down for equal and join nodes
+        :- ft_edge(N1,N2,equal), ft_active(N1), not ft_active(N2).
+        :- ft_edge(N1,N2,join), ft_active(N1), not ft_active(N2).
 
-        %%% AND
-        child_antisupported(F1,F2,N1) :- subformula(F1,and), state_node(N1),
-            state_type(N1,join), child(F1,F2), state_edge(N1,N2),
-            antisupport(F2,N2).
-        state_child_antisupported(F1,N1,N2) :- subformula(F1,and), state_node(N1),
-            state_type(N1,join), child(F1,F2), state_edge(N1,N2),
-            antisupport(F2,N2).
-        support(F1,N) :- subformula(F1,and), state_node(N),
-            support(F2,N) : child(F1,F2).
-        antisupport(F1,N1) :- subformula(F1,and), state_node(N1),
-            state_type(N1,join),
-            child_antisupported(F1,F2,N) : child(F1,F2);
-            state_child_antisupported(F1,N1,N2) : state_edge(N1,N2).
+        % Active nodes linked with 'equal' edge must have the same state
+        :- ft_node(N1,_,_), ft_node(N2,_,_),
+            ft_active(N1), ft_active(N2), ft_edge(N1,N2,equal),
+            state(N1,W), not state(N2,W).
+        :- ft_node(N1,_,_), ft_node(N2,_,_),
+            ft_active(N1), ft_active(N2), ft_edge(N1,N2,equal),
+            not state(N1,W), state(N2,W).
 
-        %%% BOT
-        support(F,N) :- subformula(F,bottom), state_node(N),
-            not state(N,W) : world(W).
-        antisupport(F,N) :- subformula(F,bottom), state_node(N).
+        % 'Join' node's children's states represent a union of the parent state
+        :- ft_node(N1,_,_), ft_edge(N1,_,join), ft_active(N1),
+            state(N1,W), not state(N2,W) : ft_edge(N1,N2,join).
+        :- ft_node(N1,_,_), ft_edge(N1,N2,join), ft_active(N1),
+            state(N2,W), not state(N1,W).
 
-        %%% NE
-        support(F,N) :- subformula(F,ne), state_node(N),
-            state(N,W).
-        antisupport(F,N) :- subformula(F,ne), state_node(N),
-            not state(N,W) : world(W).
+        % Active 'choice_rel' node with empty state has only inactive children
+        :- ft_node(N1,_,_), ft_edge(N1,N2,choice_rel), ft_active(N1),
+            state_empty(N1), ft_active(N2).
 
-        %%% DIAMOND
-        support(F1,N1) :- subformula(F1,diamond), state_node(N1),
-            state_type(N1,relation), child(F1,F2),
-            support(F2,N2) : state_edge(N1,N2).
-        antisupport(F1,N1) :- subformula(F1,diamond), state_node(N1),
-            state_type(N1,full_relation), child(F1,F2),
-            antisupport(F2,N2) : state_edge(N1,N2).
+        % Active 'choice_rel' node's children provide successor states
+        1 { state_successor(N2,W) : ft_edge(N1,N2,choice_rel) } :-
+            ft_node(N1,_,_), ft_edge(N1,_,choice_rel),
+            state(N1,W), ft_active(N1).
+        :- state_successor(N,W1), state(N,W2), not relation(W1,W2).
+        :- state_successor(N,_), not ft_active(N).
+
+        % Active 'choice_rel' successors may not be empty
+        :- ft_edge(_,N2,choice_rel), ft_active(N2), state_empty(N2).
+
+        % Active 'full_rel' node with empty state has only inactive children
+        :- ft_node(N1,_,_), ft_edge(N1,N2,full_rel), ft_active(N1),
+            state_empty(N1), ft_active(N2).
+
+        % Active 'full_rel' node's children provide 'full' successor states
+        1 { state_full_successor(N2,W) : ft_edge(N1,N2,full_rel) } :-
+            ft_node(N1,_,_), ft_edge(N1,_,full_rel),
+            state(N1,W), ft_active(N1).
+        :- state_full_successor(N,W1), state(N,W2), not relation(W1,W2).
+        :- state_full_successor(N,W1), not state(N,W2), relation(W1,W2).
+        :- state_full_successor(N,_), not ft_active(N).
+
+        % Truth conditions for variables
+        :- ft_node(N,var(V),pos), ft_active(N),
+            not valuation(W,V), state(N,W).
+        :- ft_node(N,var(V),neg), ft_active(N),
+            valuation(W,V), state(N,W).
+
+        % Truth conditions for bottom
+        :- ft_node(N,bottom,pos), ft_active(N),
+            state_empty(N).
+
+        % Truth conditions for NE
+        :- ft_node(N,ne,pos), ft_active(N),
+            state_empty(N).
+        :- ft_node(N,ne,neg), ft_active(N),
+            state_nonempty(N).
+
+        % (Truth conditions for diamond/box/conjunction/disjunction/negation
+        % are implemented implicitly)
+
+        % Symmetry breaking: lexicographic ordering of states for choice_rel
+        % and full_rel children
+        %%% TODO (and also check if it's actually helpful)
     """
 
-    query_program = """
-        %%% MAKE ROOT FORMULA TRUE IN ROOT OF STATE TREE
-        :- not support(F,R), state_root(R), formula_root(F).
-    """
+    program = formula_program
+    program += model_program
+    program += semantics_program
 
+    # Add minimization heuristics, if needed
     heuristics_program = """
         #heuristic relation(W1,W2) : world(W1), world(W2). [10,false]
         #heuristic state(1,1). [10,true]
         #heuristic valuation(W,V) : world(W), var(V). [10,false]
         #heuristic world(W) : possible_world(W), W > 1. [10,false]
     """
-
-    program = formula_program
-    program += model_program
-    program += semantics_program
-    program += query_program
     if use_minimization_heuristics:
         program += heuristics_program
 
-    control = clingo.Control(
-        ["--project", "-Wnone", "--heuristic=Domain", "--parallel-mode=4"]
-    )
+    control = clingo.Control([
+        "--project",
+        "-Wnone",
+        "--heuristic=Domain",
+        "--parallel-mode=4",
+    ])
     control.add("base", [], program)
     if verbose:
         print(".. Grounding ..")
@@ -406,7 +456,6 @@ def solve_bsml_sat(
     control.configuration.solve.models = 1
     if verbose:
         print(".. Solving ..\n")
-    graphs = []
     found_solution = False
     with control.solve(yield_=True) as handle:
         for model in handle:
