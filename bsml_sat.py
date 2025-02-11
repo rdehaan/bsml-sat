@@ -2,6 +2,8 @@ import clingo
 
 from abc import ABC, abstractmethod
 
+from gcc import solve_gcc
+
 class BSMLFormula(ABC):
 
     @abstractmethod
@@ -293,15 +295,23 @@ def encode_formula_tree(formula, num_vars, polarity):
 
 
 def solve_bsml_sat(
-    formula,
+    sat_formula,
+    unsat_formula,
     max_num_worlds=4,
     num_vars=3,
     verbose=True,
+    custom_program=None,
     use_minimization_heuristics=False,
 ):
 
-    formula_program = encode_formula_tree(
-        formula_to_nf(formula),
+    sat_formula_program = encode_formula_tree(
+        formula_to_nf(sat_formula),
+        num_vars,
+        True,
+    )
+
+    unsat_formula_program = encode_formula_tree(
+        formula_to_nf(unsat_formula),
         num_vars,
         True,
     )
@@ -429,8 +439,12 @@ def solve_bsml_sat(
         %%% TODO (and also check if it's actually helpful)
     """
 
-    program = formula_program
+    program = "#program guess.\n"
     program += model_program
+    if custom_program:
+        program += custom_program
+
+    program += sat_formula_program
     program += semantics_program
 
     # Add minimization heuristics, if needed
@@ -443,39 +457,33 @@ def solve_bsml_sat(
     if use_minimization_heuristics:
         program += heuristics_program
 
-    control = clingo.Control([
-        "--project",
-        "-Wnone",
-        "--heuristic=Domain",
-        "--parallel-mode=4",
-    ])
-    control.add("base", [], program)
-    if verbose:
-        print(".. Grounding ..")
-    control.ground([("base", [])])
-    control.configuration.solve.models = 1
-    if verbose:
-        print(".. Solving ..\n")
-    found_solution = False
-    with control.solve(yield_=True) as handle:
-        for model in handle:
-            found_solution = True
-            solution = [
-                str(atom) for atom in model.symbols(shown=True)
-            ]
-            solution.sort()
-            if verbose:
-                print("## Model witnessing satisfiability ##")
-                for atom in solution:
-                    print(atom)
-                print()
-        handle.get()
+    program += "#program check.\n"
+    program += unsat_formula_program
+    program += semantics_program
 
-    if found_solution:
-        print("BSML formula satisfiable!")
-    else:
-        print("BSML formula unsatisfiable!")
+    program += "#program glue.\n"
+    program += f"""
+        world(1..{max_num_worlds}).
+        var(1..{num_vars}).
+    """
+    program += """
+        valuation(W,V) :- world(W), var(V).
+        relation(W1,W2) :- world(W1), world(W2).
+        state(1,W) :- world(W).
 
-    if verbose:
-        print("\n.. Done solving ..")
-        print(f"Total solving time: {control.statistics['summary']['times']['solve']:.2f} sec")
+        #show world/1.
+        #show valuation/2.
+        #show relation/2.
+        #show state/2.
+    """
+
+    def on_model(model):
+        solution = [
+            str(atom) for atom in model.symbols(shown=True)
+        ]
+        solution.sort()
+        print("## Solution ##")
+        for atom in solution:
+            print(atom)
+
+    solve_gcc(program, on_model)
