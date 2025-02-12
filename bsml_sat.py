@@ -301,6 +301,7 @@ def solve_bsml_sat(
     num_vars=3,
     verbose=True,
     custom_program=None,
+    timeout=None,
     use_minimization_heuristics=False,
 ):
 
@@ -486,4 +487,4 @@ def solve_bsml_sat(
         for atom in solution:
             print(atom)
 
-    solve_gcc(program, on_model)
+    solve_gcc(program, on_model, timeout)
