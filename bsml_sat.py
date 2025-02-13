@@ -162,47 +162,6 @@ def enrich_formula(formula):
         return formula
 
 
-# def formula_to_asp_facts(formula):
-#
-#     def fact_constructor(index, formula):
-#         if isinstance(formula, Var):
-#             return index+1, f"subformula({index},var({formula.name})).\n"
-#         if isinstance(formula, NE):
-#             return index+1, f"subformula({index},ne).\n"
-#         if isinstance(formula, Bottom):
-#             return index+1, f"subformula({index},bottom).\n"
-#         if isinstance(formula, (And, Or)):
-#             orig_index = index
-#             index += 1
-#             program = ""
-#             child_indices = []
-#             for child in formula.children:
-#                 child_indices.append(index)
-#                 index, add_program = fact_constructor(index, child)
-#                 program += add_program
-#             if isinstance(formula, Or):
-#                 program += f"subformula({orig_index},or).\n"
-#             if isinstance(formula, And):
-#                 program += f"subformula({orig_index},and).\n"
-#             for child_index in child_indices:
-#                 program += f"child({orig_index},{child_index}).\n"
-#             return index, program
-#         if isinstance(formula, (Diamond, Box, Neg)):
-#             if isinstance(formula, Diamond):
-#                 program = f"subformula({index},diamond).\n"
-#             elif isinstance(formula, Box):
-#                 program = f"subformula({index},box).\n"
-#             elif isinstance(formula, Neg):
-#                 program = f"subformula({index},neg).\n"
-#             program += f"child({index},{index+1}).\n"
-#             index, add_program = fact_constructor(index+1, formula.child)
-#             program += add_program
-#             return index, program
-#
-#     _, program = fact_constructor(1, formula)
-#     return program + "formula_root(1).\n"
-
-
 def encode_formula_tree(formula, num_vars, polarity):
 
     def encode_formula_tree(index, formula, num_vars, polarity):
@@ -303,6 +262,7 @@ def solve_bsml_sat(
     custom_program=None,
     timeout=None,
     use_minimization_heuristics=False,
+    symmetry_breaking_variant=2,
 ):
 
     sat_formula_program = encode_formula_tree(
@@ -319,32 +279,92 @@ def solve_bsml_sat(
 
     # Guess a Kripke model
     model_program = f"""
-        possible_world(1..{max_num_worlds}).
-        var(1..{num_vars}).
+        #const n = {max_num_worlds}.
+        #const v = {num_vars}.
+        var(1..v).
+        world(1..n).
     """
     model_program += """
-        % Only use a (sequential non-empty) subset of the possible worlds
-        { world(W) : possible_world(W) }.
-        world(W-1) :- world(W), possible_world(W-1).
-        :- not world(1).
-
         % Guess a valuation
         { valuation(W,V) : world(W), var(V) }.
 
         % Guess a relation
         { relation(W1,W2) : world(W1), world(W2) }.
 
-        % Symmetry breaking: order worlds by their out-degree
-        out_degree(W1,D) :- world(W1), D = #count { W2 : relation(W1,W2) }.
-        :- out_degree(W1,D1), out_degree(W2,D2), W2 > W1, D2 < D1.
-        %in_degree(W1,D) :- world(W1), D = #count { W2 : relation(W2,W1) }.
-        %:- out_degree(W1,D), out_degree(W2,D), W2 > W1,
-        %    in_degree(W1,D1), in_degree(W2,D2), D2 < D1.
-
         #show world/1.
         #show valuation/2.
         #show relation/2.
     """
+    # Symmetry breaking
+    if symmetry_breaking_variant == 1:
+        # Simple symmetry breaking
+        model_program += """
+            % Symmetry breaking: order worlds by their out-degree
+            out_degree(W1,D) :- world(W1), D = #count { W2 : relation(W1,W2) }.
+            :- out_degree(W1,D1), out_degree(W2,D2), W2 > W1, D2 < D1.
+            %in_degree(W1,D) :- world(W1), D = #count { W2 : relation(W2,W1) }.
+            %:- out_degree(W1,D), out_degree(W2,D), W2 > W1,
+            %    in_degree(W1,D1), in_degree(W2,D2), D2 < D1.
+        """
+    elif symmetry_breaking_variant == 2:
+        # Symmetry breaking for directed graphs
+        # from the paper "Symmetry-Breaking Constraints for Directed Graphs"
+        # by Jussi Rintanen and Masood Feyzbakhsh Rankooh
+        # (doi.org/10.3233/FAIA240998)
+        model_program += """
+            sb_max_index(n).
+            sb_index(1..M) :- sb_max_index(M).
+            sb_pair(I,J) :- sb_index(I), sb_index(J), I < J.
+
+            sb_seq_length(I,J,2*N-1) :- sb_pair(I,J), sb_max_index(N).
+            sb_triple(I,J,1..L) :- sb_pair(I,J), sb_seq_length(I,J,L).
+
+            sb_statement(I,J,K,first,relation(K,I)) :-
+                sb_triple(I,J,K),
+                K < I.
+            sb_statement(I,J,K,first,relation(I,K-I+1)) :-
+                sb_triple(I,J,K), sb_max_index(N),
+                K >= I, K < I+N.
+            sb_statement(I,J,K,first,relation(K-N+1,I)) :-
+                sb_triple(I,J,K), sb_max_index(N),
+                K >= I+N.
+
+            sb_statement(I,J,K,second,relation(K,J)) :-
+                sb_triple(I,J,K),
+                K < I.
+            sb_statement(I,J,K,second,relation(J,K-I+1)) :-
+                sb_triple(I,J,K), sb_max_index(N),
+                K >= I, K < I+N,
+                K-I+1 != I, K-I+1 != J.
+            sb_statement(I,J,K,second,relation(J,J)) :-
+                sb_triple(I,J,K), sb_max_index(N),
+                K >= I, K < I+N,
+                K-I+1 = I.
+            sb_statement(I,J,K,second,relation(J,I)) :-
+                sb_triple(I,J,K), sb_max_index(N),
+                K >= I, K < I+N,
+                K-I+1 = J.
+            sb_statement(I,J,K,second,relation(K-N+1,J)) :-
+                sb_triple(I,J,K), sb_max_index(N),
+                K >= I+N,
+                K-N+1 != J.
+            sb_statement(I,J,K,second,relation(I,J)) :-
+                sb_triple(I,J,K), sb_max_index(N),
+                K >= I+N,
+                K-N+1 = J.
+
+            sb_y(I,J,0) :- sb_pair(I,J).
+            :- sb_triple(I,J,K),
+                sb_statement(I,J,K,first,relation(F1,F2)),
+                sb_statement(I,J,K,second,relation(S1,S2)),
+                sb_y(I,J,K-1), relation(F1,F2), not relation(S1,S2).
+            sb_y(I,J,K) :- sb_triple(I,J,K), K < L, sb_seq_length(I,J,L),
+                sb_statement(I,J,K,first,relation(F1,F2)),
+                sb_y(I,J,K-1), relation(F1,F2).
+            sb_y(I,J,K) :- sb_triple(I,J,K), K < L, sb_seq_length(I,J,L),
+                sb_statement(I,J,K,second,relation(S1,S2)),
+                sb_y(I,J,K-1), not relation(S1,S2).
+        """
 
     # Express the semantics
     semantics_program = """
