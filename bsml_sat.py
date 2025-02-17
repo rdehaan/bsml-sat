@@ -493,21 +493,11 @@ def solve_bsml_sat(
     program += """
         relevant(state(1,W)) :- world(W).
 
-        { relevant(relation(W1,W2)) } :- world(W1), world(W2).
-        #heuristic relevant(relation(W1,W2)) :
-            world(W1), world(W2). [1,false]
-        :- state_successor(N,W1), state(N,W2),
-            not relevant(relation(W1,W2)).
-        :- state_full_successor(N,W1), world(W2),
-            not relevant(relation(W1,W2)).
+        relevant(relation(W1,W2)) :- state_successor(N,W1), state(N,W2).
+        relevant(relation(W1,W2)) :- state_full_successor(N,W1), world(W2).
 
-        relevant(valuation(W,V)) :- world(W), var(V).
-
-        { relevant(valuation(W,V)) } :- world(W), var(V).
-        #heuristic relevant(valuation(W,V)) :
-            world(W), var(V). [1,false]
-        :- ft_node(N,var(V),_), ft_active(N),
-            not relevant(valuation(W,V)), state(N,W).
+        relevant(valuation(W,V)) :- ft_node(N,var(V),_), ft_active(N),
+            state(N,W).
     """
 
     program += "#program glue.\n"
