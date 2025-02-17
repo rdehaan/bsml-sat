@@ -13,6 +13,7 @@ from clingo.application import clingo_main, Application
 from clingo.propagator import PropagateControl, PropagateInit, Propagator
 from clingo.backend import Backend
 from clingo.ast import parse_string, AST, ASTType
+from clingo.symbol import Function
 
 
 class Transformer:
@@ -63,10 +64,10 @@ class Checker:
     Class wrapping a solver to perform the second level check.
     """
     _ctl: Control
-    _map: List[Tuple[int, int]]
+    _map: List[Tuple[int, int, int]]
 
     def __init__(self):
-        self._ctl = Control()
+        self._ctl = Control(["--heuristic=Domain"])
         self._map = []
 
     def backend(self) -> Backend:
@@ -75,12 +76,12 @@ class Checker:
         """
         return self._ctl.backend()
 
-    def add(self, guess_lit: int, check_lit: int):
+    def add(self, guess_lit: int, check_lit: int, indicator_lit: int):
         """
         Map the given solver literal to the corresponding program literal in
         the checker.
         """
-        self._map.append((guess_lit, check_lit))
+        self._map.append((guess_lit, check_lit, indicator_lit))
 
     def ground(self, check: Sequence[ast.AST]):
         """
@@ -104,13 +105,23 @@ class Checker:
         assignment = control.assignment
 
         assumptions = []
-        for guess_lit, check_lit in self._map:
+        for guess_lit, check_lit, _ in self._map:
             guess_truth = assignment.value(guess_lit)
             assumptions.append(check_lit if guess_truth else -check_lit)
 
-        ret = cast(SolveResult, self._ctl.solve(assumptions))
-        if ret.unsatisfiable is not None:
-            return ret.unsatisfiable
+        # ret = cast(SolveResult, self._ctl.solve(assumptions))
+        # if ret.unsatisfiable is not None:
+        #     return ret.unsatisfiable
+        with self._ctl.solve(assumptions, yield_=True) as handle:
+            result = handle.get()
+            model = handle.model()
+            mask = []
+            if model:
+                for guess_lit, check_lit, indicator_lit in self._map:
+                    if model.is_true(indicator_lit):
+                        mask.append(guess_lit)
+            if result.unsatisfiable is not None:
+                return result.unsatisfiable, mask
 
         raise RuntimeError("search interrupted")
 
@@ -145,7 +156,6 @@ class CheckPropagator(Propagator):
 
                     # ignore atoms that are not glue
                     if str(atom.symbol) not in self._glue:
-                        # print(f"Skipping atom {atom.symbol}")
                         continue
 
                     guess_lit = init.solver_literal(atom.literal)
@@ -156,6 +166,9 @@ class CheckPropagator(Propagator):
                         continue
 
                     check_lit = backend.add_atom(atom.symbol)
+
+                    indicator_symbol = Function("relevant", [atom.symbol], True)
+                    indicator_lit = backend.add_atom(indicator_symbol)
 
                     # print(f"Adding atom {atom.symbol} as guess_lit {guess_lit} and check_lit {check_lit}..")
 
@@ -170,7 +183,8 @@ class CheckPropagator(Propagator):
                     # mapping table of the checker
                     else:
                         backend.add_rule([check_lit], [], True)
-                        checker.add(guess_lit, check_lit)
+                        # backend.add_rule([indicator_lit], [], True)
+                        checker.add(guess_lit, check_lit, indicator_lit)
 
             checker.ground(self._check)
 
@@ -182,7 +196,10 @@ class CheckPropagator(Propagator):
         assignment = control.assignment
         checker = self._checkers[control.thread_id]
 
-        if not checker.check(control):
+        unsatisfiable, mask = checker.check(control)
+        if not unsatisfiable:
+
+            # print(f"Adding conflict for mask {mask}")
 
             conflict = []
 
@@ -197,11 +214,14 @@ class CheckPropagator(Propagator):
             #             conflict.append(lit)
 
             for lit in self._gluelits:
-                conflict.append(-lit if assignment.is_true(lit) else lit)
+                if lit in mask:
+                    conflict.append(-lit if assignment.is_true(lit) else lit)
 
             # print(f"Adding clause: {conflict}")
+            # print('.',end='')
 
             control.add_clause(conflict)
+
 
 
 def solve_gcc(program, on_model, timeout=None, verbose=True):
